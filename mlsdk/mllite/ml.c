@@ -122,7 +122,7 @@ unsigned short inv_orientation_matrix_to_scalar(const signed char *mtx);
  *
  *  @return INV_SUCCESS or error code.
  */
-inv_error_t inv_serial_start(char const *port)
+inv_error_t inv_serial_start(char const *port, void **mlsl_handle)
 {
     INVENSENSE_FUNC_START;
     inv_error_t result;
@@ -140,6 +140,11 @@ inv_error_t inv_serial_start(char const *port)
     if (INV_SUCCESS != result) {
         (void)inv_state_transition(INV_STATE_SERIAL_CLOSED);
     }
+    
+    if (mlsl_handle != NULL)
+    		*mlsl_handle = g_mlsl_handle;
+    else
+    		ALOGE("Error: mlsl_handle is NULL.\n");
 
     return result;
 }
@@ -178,6 +183,17 @@ void *inv_get_serial_handle(void)
 {
     INVENSENSE_FUNC_START;
     return g_mlsl_handle;
+}
+
+/**
+ *  @brief  Set the serial file handle to the device.
+ *  @param  mlsl_handle  The serial file handle.
+ */
+void inv_set_serial_handle(void *mlsl_handle)
+{
+	INVENSENSE_FUNC_START;
+	g_mlsl_handle = mlsl_handle;
+	return;
 }
 
 /**
@@ -251,6 +267,7 @@ inv_error_t inv_apply_calibration(void)
             MPL_LOGE("Unable to set Gyro Calibration\n");
             return result;
         }
+
         if (NULL != mldl_cfg->accel){
             result = inv_set_accel_calibration(accelScale, accelCal);
             if (INV_SUCCESS != result) {
@@ -544,7 +561,7 @@ inv_error_t inv_update_data(void)
 
     if (inv_get_state() != INV_STATE_DMP_STARTED)
         return INV_ERROR_SM_IMPROPER_STATE;
-
+    
     // Set the maximum number of FIFO packets we want to process
     if (mldl_cfg->requested_sensors & INV_DMP_PROCESSOR) {
         ftry = 100;             // Large enough to process all packets
@@ -554,6 +571,7 @@ inv_error_t inv_update_data(void)
 
     // Go and process at most ftry number of packets, probably less than ftry
     result = inv_read_and_process_fifo(ftry, &got);
+    
     if (result) {
         LOG_RESULT_LOCATION(result);
         return result;
@@ -575,6 +593,7 @@ inv_error_t inv_update_data(void)
     }
 
     result = inv_get_fifo_status();
+    
     return result;
 }
 

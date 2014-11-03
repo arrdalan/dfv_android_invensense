@@ -127,7 +127,6 @@ void setCallbackObject(MPLSensor* gbpt)
     gMPLSensor = gbpt;
 }
 
-
 /*****************************************************************************
  * sensor class implementation
  */
@@ -155,7 +154,7 @@ MPLSensor::MPLSensor() :
     inv_error_t rv;
     int mpu_int_fd, i;
     char *port = NULL;
-
+            
     ALOGV_IF(EXTRA_VERBOSE, "MPLSensor constructor: numSensors = %d", numSensors);
 
     pthread_mutex_init(&mMplMutex, NULL);
@@ -267,7 +266,7 @@ MPLSensor::MPLSensor() :
     for (int i = 0; i < numSensors; i++)
         mDelays[i] = 30000000LLU; // 30 ms by default
 
-    if (inv_serial_start(port) != INV_SUCCESS) {
+    if (inv_serial_start(port, &mpu_dev_fd) != INV_SUCCESS) {
         ALOGE("Fatal Error : could not open MPL serial interface");
     }
 
@@ -286,8 +285,160 @@ MPLSensor::MPLSensor() :
 
 }
 
+/* FIXME: This has a lot of code in common with the previous constructor. */
+MPLSensor::MPLSensor(char *mpu_dev_name, char *mpuirq_dev_name,
+					 char *accelirq_dev_name, char *timerirq_dev_name) :
+    SensorBase(NULL, NULL),
+            mMpuAccuracy(0), mNewData(0),
+            ////mDmpStarted(false),
+            mDmpStarted(true),
+            mMasterSensorMask(INV_ALL_SENSORS),
+            mLocalSensorMask(ALL_MPL_SENSORS_NP), mPollTime(-1),
+            mCurFifoRate(-1), mHaveGoodMpuCal(false), mHaveGoodCompassCal(false),
+            mUseTimerIrqAccel(false), mUsetimerIrqCompass(true),
+            mUseTimerirq(false), mSampleCount(0),
+            mEnabled(0), mPendingMask(0)
+{
+    FUNC_LOG;
+    inv_error_t rv;
+    int mpu_int_fd, i;
+    char *port = mpu_dev_name;
+
+    ALOGV_IF(EXTRA_VERBOSE, "MPLSensor constructor: numSensors = %d", numSensors);
+
+    pthread_mutex_init(&mMplMutex, NULL);
+
+    mForceSleep = false;
+
+    /* used for identifying whether 9axis is enabled or not             */
+    /* this variable will be changed in initMPL() when libmpl is loaded */
+    /* sensor list will be changed based on this variable               */
+    mNineAxisEnabled = false;
+
+    for (i = 0; i < ARRAY_SIZE(mPollFds); i++) {
+        mPollFds[i].fd = -1;
+        mPollFds[i].events = 0;
+    }
+
+    pthread_mutex_lock(&mMplMutex);
+
+    mpu_int_fd = open(mpuirq_dev_name, O_RDWR);
+    if (mpu_int_fd == -1) {
+        ALOGE("could not open the mpu irq device node");
+    } else {
+        fcntl(mpu_int_fd, F_SETFL, O_NONBLOCK);
+        mIrqFds.add(MPUIRQ_FD, mpu_int_fd);
+        mPollFds[MPUIRQ_FD].fd = mpu_int_fd;
+        mPollFds[MPUIRQ_FD].events = POLLIN;
+    }
+
+    accel_fd = open(accelirq_dev_name, O_RDWR);
+    if (accel_fd == -1) {
+        ALOGE("could not open the accel irq device node");
+    } else {
+        fcntl(accel_fd, F_SETFL, O_NONBLOCK);
+        mIrqFds.add(ACCELIRQ_FD, accel_fd);
+        mPollFds[ACCELIRQ_FD].fd = accel_fd;
+        mPollFds[ACCELIRQ_FD].events = POLLIN;
+    }
+
+    timer_fd = open(timerirq_dev_name, O_RDWR);
+    if (timer_fd == -1) {
+        ALOGE("could not open the timer irq device node");
+    } else {
+        fcntl(timer_fd, F_SETFL, O_NONBLOCK);
+        mIrqFds.add(TIMERIRQ_FD, timer_fd);
+        mPollFds[TIMERIRQ_FD].fd = timer_fd;
+        mPollFds[TIMERIRQ_FD].events = POLLIN;
+    }
+
+    data_fd = mpu_int_fd;
+
+    if ((accel_fd == -1) && (timer_fd != -1)) {
+        //no accel irq and timer available
+        mUseTimerIrqAccel = true;
+    }
+
+    memset(mPendingEvents, 0, sizeof(mPendingEvents));
+
+    mPendingEvents[RotationVector].version = sizeof(sensors_event_t);
+    mPendingEvents[RotationVector].sensor = ID_RV;
+    mPendingEvents[RotationVector].type = SENSOR_TYPE_ROTATION_VECTOR;
+    mPendingEvents[RotationVector].acceleration.status
+            = SENSOR_STATUS_ACCURACY_HIGH;
+
+    mPendingEvents[LinearAccel].version = sizeof(sensors_event_t);
+    mPendingEvents[LinearAccel].sensor = ID_LA;
+    mPendingEvents[LinearAccel].type = SENSOR_TYPE_LINEAR_ACCELERATION;
+    mPendingEvents[LinearAccel].acceleration.status
+            = SENSOR_STATUS_ACCURACY_HIGH;
+
+    mPendingEvents[Gravity].version = sizeof(sensors_event_t);
+    mPendingEvents[Gravity].sensor = ID_GR;
+    mPendingEvents[Gravity].type = SENSOR_TYPE_GRAVITY;
+    mPendingEvents[Gravity].acceleration.status = SENSOR_STATUS_ACCURACY_HIGH;
+
+    mPendingEvents[Gyro].version = sizeof(sensors_event_t);
+    mPendingEvents[Gyro].sensor = ID_GY;
+    mPendingEvents[Gyro].type = SENSOR_TYPE_GYROSCOPE;
+    mPendingEvents[Gyro].gyro.status = SENSOR_STATUS_ACCURACY_HIGH;
+
+    mPendingEvents[Accelerometer].version = sizeof(sensors_event_t);
+    mPendingEvents[Accelerometer].sensor = ID_A;
+    mPendingEvents[Accelerometer].type = SENSOR_TYPE_ACCELEROMETER;
+    mPendingEvents[Accelerometer].acceleration.status
+            = SENSOR_STATUS_ACCURACY_HIGH;
+
+    mPendingEvents[MagneticField].version = sizeof(sensors_event_t);
+    mPendingEvents[MagneticField].sensor = ID_M;
+    mPendingEvents[MagneticField].type = SENSOR_TYPE_MAGNETIC_FIELD;
+    mPendingEvents[MagneticField].magnetic.status = SENSOR_STATUS_ACCURACY_HIGH;
+
+    mPendingEvents[Orientation].version = sizeof(sensors_event_t);
+    mPendingEvents[Orientation].sensor = ID_O;
+    mPendingEvents[Orientation].type = SENSOR_TYPE_ORIENTATION;
+    mPendingEvents[Orientation].orientation.status
+            = SENSOR_STATUS_ACCURACY_HIGH;
+
+    mHandlers[RotationVector] = &MPLSensor::rvHandler;
+    mHandlers[LinearAccel] = &MPLSensor::laHandler;
+    mHandlers[Gravity] = &MPLSensor::gravHandler;
+    mHandlers[Gyro] = &MPLSensor::gyroHandler;
+    mHandlers[Accelerometer] = &MPLSensor::accelHandler;
+    mHandlers[MagneticField] = &MPLSensor::compassHandler;
+    mHandlers[Orientation] = &MPLSensor::orienHandler;
+
+    for (int i = 0; i < numSensors; i++)
+        mDelays[i] = 30000000LLU; // 30 ms by default
+
+    if (inv_serial_open(port, &mpu_dev_fd) != INV_SUCCESS) {
+        ALOGE("Fatal Error : could not open MPL serial interface");
+    }
+    setGlobalVars();
+
+    //initialize library parameters
+
+    //setup the FIFO contents
+    setupFIFO();
+
+    //we start the motion processing only when a sensor is enabled...
+    //rv = inv_dmp_start();
+    //ALOGE_IF(rv != INV_SUCCESS, "Fatal error: could not start the DMP correctly. (code = %d)\n", rv);
+    //dmp_started = true;
+
+    pthread_mutex_unlock(&mMplMutex);
+
+}
+
+void MPLSensor::setGlobalVars()
+{
+    inv_set_serial_handle(mpu_dev_fd);
+    setCallbackObject((MPLSensor *) gbpt);
+}
+
 MPLSensor::~MPLSensor()
 {
+    setGlobalVars();
     FUNC_LOG;
     pthread_mutex_lock(&mMplMutex);
     if (inv_dmp_stop() != INV_SUCCESS) {
@@ -317,7 +468,9 @@ void MPLSensor::clearIrqData(bool* irq_set)
     for (i = 0; i < ARRAY_SIZE(mPollFds); i++) {
         int cur_fd = mPollFds[i].fd;
         int j = 0;
+        
         if (mPollFds[i].revents & POLLIN) {
+    
             nread = read(cur_fd, &irqdata, sizeof(irqdata));
             if (nread > 0) {
                 irq_set[i] = true;
@@ -336,6 +489,7 @@ void MPLSensor::setPowerStates(int enabled_sensors)
 {
     FUNC_LOG;
     bool irq_set[5] = { false, false, false, false, false };
+    setGlobalVars();
 
     //ALOGV(" setPowerStates: %d dmp_started: %d", enabled_sensors, mDmpStarted);
 
@@ -454,6 +608,7 @@ void MPLSensor::initMPL()
     inv_error_t result;
     unsigned short bias_update_mask = 0xFFFF;
     struct mldl_cfg *mldl_cfg;
+    setGlobalVars();
 
     if (inv_dmp_open() != INV_SUCCESS) {
         ALOGE("Fatal Error : could not open DMP correctly.\n");
@@ -519,6 +674,7 @@ void MPLSensor::setupFIFO()
 {
     FUNC_LOG;
     inv_error_t result;
+    setGlobalVars();
 
     result = inv_send_accel(INV_ALL, INV_32_BIT);
     if (result != INV_SUCCESS) {
@@ -559,6 +715,8 @@ void MPLSensor::setupFIFO()
 void MPLSensor::setupCallbacks()
 {
     FUNC_LOG;
+    setGlobalVars();
+    
     if (inv_set_motion_callback(mot_cb_wrapper) != INV_SUCCESS) {
         ALOGE("Error : Motion callback could not be set.\n");
 
@@ -576,6 +734,8 @@ void MPLSensor::setupCallbacks()
 void MPLSensor::cbOnMotion(uint16_t val)
 {
     FUNC_LOG;
+    setGlobalVars();
+    
     //after the first no motion, the gyro should be calibrated well
     if (val == 2) {
         mMpuAccuracy = SENSOR_STATUS_ACCURACY_HIGH;
@@ -605,6 +765,8 @@ void MPLSensor::gyroHandler(sensors_event_t* s, uint32_t* pending_mask,
 {
     VFUNC_LOG;
     inv_error_t res;
+    setGlobalVars();
+    
     res = inv_get_float_array(INV_GYROS, s->gyro.v);
     s->gyro.v[0] = s->gyro.v[0] * M_PI / 180.0;
     s->gyro.v[1] = s->gyro.v[1] * M_PI / 180.0;
@@ -617,23 +779,28 @@ void MPLSensor::gyroHandler(sensors_event_t* s, uint32_t* pending_mask,
 void MPLSensor::accelHandler(sensors_event_t* s, uint32_t* pending_mask,
                               int index)
 {
+    setGlobalVars();
+        
+    
     //VFUNC_LOG;
     inv_error_t res;
     res = inv_get_float_array(INV_ACCELS, s->acceleration.v);
-    //res = inv_get_accel_float(s->acceleration.v);
+    
     s->acceleration.v[0] = s->acceleration.v[0] * 9.81;
     s->acceleration.v[1] = s->acceleration.v[1] * 9.81;
     s->acceleration.v[2] = s->acceleration.v[2] * 9.81;
     //ALOGV_IF(EXTRA_VERBOSE, "accel data: %f %f %f", s->acceleration.v[0], s->acceleration.v[1], s->acceleration.v[2]);
     s->acceleration.status = SENSOR_STATUS_ACCURACY_HIGH;
-    if (res == INV_SUCCESS)
+    if (res == INV_SUCCESS) {
         *pending_mask |= (1 << index);
+    }
 }
 
 int MPLSensor::estimateCompassAccuracy()
 {
     inv_error_t res;
     int rv;
+    setGlobalVars();
 
     res = inv_get_compass_accuracy(&rv);
     if(rv >= SENSOR_STATUS_ACCURACY_MEDIUM) {
@@ -652,6 +819,7 @@ void MPLSensor::compassHandler(sensors_event_t* s, uint32_t* pending_mask,
     float bias_error[3];
     float total_be;
     static int bias_error_settled = 0;
+    setGlobalVars();
 
     res = inv_get_float_array(INV_MAGNETOMETER, s->magnetic.v);
 
@@ -675,6 +843,7 @@ void MPLSensor::rvHandler(sensors_event_t* s, uint32_t* pending_mask,
     float norm = 0;
     float ang = 0;
     inv_error_t r;
+    setGlobalVars();
 
     r = inv_get_float_array(INV_QUATERNION, quat);
 
@@ -717,6 +886,8 @@ void MPLSensor::laHandler(sensors_event_t* s, uint32_t* pending_mask,
 {
     VFUNC_LOG;
     inv_error_t res;
+    setGlobalVars();
+    
     res = inv_get_float_array(INV_LINEAR_ACCELERATION, s->gyro.v);
     s->gyro.v[0] *= 9.81;
     s->gyro.v[1] *= 9.81;
@@ -731,6 +902,8 @@ void MPLSensor::gravHandler(sensors_event_t* s, uint32_t* pending_mask,
 {
     VFUNC_LOG;
     inv_error_t res;
+    setGlobalVars();
+    
     res = inv_get_float_array(INV_GRAVITY, s->gyro.v);
     s->gyro.v[0] *= 9.81;
     s->gyro.v[1] *= 9.81;
@@ -791,6 +964,7 @@ void MPLSensor::orienHandler(sensors_event_t* s, uint32_t* pending_mask,
     float euler[3];
     float heading[1];
     float rot_mat[9];
+    setGlobalVars();
 
     res = inv_get_float_array(INV_ROTATION_MATRIX, rot_mat);
 
@@ -856,6 +1030,7 @@ int MPLSensor::enable(int32_t handle, int en)
         mEnabled |= (uint32_t(flags) << what);
         ALOGV_IF(EXTRA_VERBOSE, "mEnabled = %x", mEnabled);
         setPowerStates(mEnabled);
+        
         pthread_mutex_unlock(&mMplMutex);
         if (!newState)
             update_delay();
@@ -915,6 +1090,7 @@ int MPLSensor::update_delay()
     FUNC_LOG;
     int rv = 0;
     bool irq_set[5];
+    setGlobalVars();
 
     pthread_mutex_lock(&mMplMutex);
 
@@ -991,6 +1167,8 @@ int MPLSensor::readEvents(sensors_event_t* data, int count)
     int i;
     bool irq_set[5] = { false, false, false, false, false };
     inv_error_t rv;
+    setGlobalVars();
+    
     if (count < 1)
         return -EINVAL;
     int numEventReceived = 0;
@@ -999,6 +1177,7 @@ int MPLSensor::readEvents(sensors_event_t* data, int count)
 
     pthread_mutex_lock(&mMplMutex);
     if (mDmpStarted) {
+    	
         //ALOGV_IF(EXTRA_VERBOSE, "Update Data");
         rv = inv_update_data();
         ALOGE_IF(rv != INV_SUCCESS, "inv_update_data error (code %d)", (int) rv);
@@ -1062,9 +1241,12 @@ int MPLSensor::getTimerFd() const
     return timer_fd;
 }
 
-int MPLSensor::getPowerFd() const
+int MPLSensor::getPowerFd()
 {
-    int hdl = (int) inv_get_serial_handle();
+    setGlobalVars();
+    
+    int hdl = (int) inv_get_serial_handle();    
+    
     //ALOGV("MPLSensor::getPowerFd returning %d", hdl);
     return hdl;
 }
@@ -1084,6 +1266,7 @@ void MPLSensor::handlePowerEvent()
 {
     VFUNC_LOG;
     mpuirq_data irqd;
+    setGlobalVars();
 
     int fd = (int) inv_get_serial_handle();
     read(fd, &irqd, sizeof(irqd));
@@ -1131,6 +1314,7 @@ void MPLSensor::wakeEvent()
 int MPLSensor::populateSensorList(struct sensor_t *list, int len)
 {
     int numsensors;
+    setGlobalVars();
 
     if(len < 7*sizeof(sensor_t)) {
         ALOGE("sensor list too small, not populating.");

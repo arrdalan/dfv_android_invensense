@@ -40,6 +40,8 @@ class MPLSensor: public SensorBase
 
 public:
     MPLSensor();
+    MPLSensor(char *mpu_dev_name, char *mpuirq_dev_name,
+	  	      char *accelirq_dev_name, char *timerirq_dev_name);
     virtual ~MPLSensor();
 
     enum
@@ -60,7 +62,7 @@ public:
     virtual int getFd() const;
     virtual int getAccelFd() const;
     virtual int getTimerFd() const;
-    virtual int getPowerFd() const;
+    virtual int getPowerFd();
     virtual int getPollTime();
     virtual bool hasPendingEvents() const;
     virtual void handlePowerEvent();
@@ -69,6 +71,8 @@ public:
     int populateSensorList(struct sensor_t *list, int len);
     void cbOnMotion(uint16_t);
     void cbProcData();
+    void setGlobalVars();
+    void *gbpt;
 
 protected:
 
@@ -115,6 +119,7 @@ private:
     int update_delay();
     int accel_fd;
     int timer_fd;
+    void *mpu_dev_fd; /* We use (void *) to be compatible with the type used in ml.c */
 
     uint32_t mEnabled;
     uint32_t mPendingMask;

@@ -442,10 +442,11 @@ struct inv_obj_t {
     /* - Function p-types. - */
     /* --------------------- */
 
-    inv_error_t inv_serial_start(char const *port);
+    inv_error_t inv_serial_start(char const *port, void **mlsl_handle);
     inv_error_t inv_serial_stop(void);
     inv_error_t inv_set_mpu_sensors(unsigned long sensors);
     void *inv_get_serial_handle(void);
+    void inv_set_serial_handle(void *mlsl_handle);
 
     /*API for handling the buffer */
     inv_error_t inv_update_data(void);
